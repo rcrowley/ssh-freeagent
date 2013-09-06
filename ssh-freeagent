@@ -7,7 +7,7 @@
 #/   <command>    local command to run with SSH_FREEAGENT_IDENTITY in its environment
 #/   <arg>        argument to local command <command>
 
-set -e -x
+set -e
 
 TMP="$(mktemp -d)"
 trap "rm -rf \"$TMP\"" EXIT INT QUIT TERM

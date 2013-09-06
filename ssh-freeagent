@@ -1,0 +1,80 @@
+#!/bin/sh
+
+#/ Usage: ssh-freeagent [-i<identity>] [<user>@]<hostname>[...] [--] <command> [<arg>[...]]
+#/   -i<identity> identity file containing the private key to use to connect to <hostname>
+#/   <user>       remote user as in ssh(1)
+#/   <hostname>   remote hostname as in ssh(1)
+#/   <command>    local command to run with SSH_FREEAGENT_IDENTITY in its environment
+#/   <arg>        argument to local command <command>
+
+set -e -x
+
+TMP="$(mktemp -d)"
+trap "rm -rf \"$TMP\"" EXIT INT QUIT TERM
+
+usage() {
+    grep "^#/" "$0" | cut -c"4-" >&2
+    exit "$1"
+}
+while [ "$#" -gt 0 ]
+do
+    case "$1" in
+        -h|--help) usage 0;;
+        -i) IDENTITY="$2" shift 2;;
+        -i*) IDENTITY="$(echo "$1" | cut -c"3-")" shift;;
+        -*) usage 1;;
+        *) break;;
+    esac
+done
+while [ "$#" -gt 0 ]
+do
+    [ "$1" ] || usage 1
+    [ "$1" = "--" ] && shift && break
+    which "$1" >"/dev/null" && break
+    echo "$1"
+    shift
+done >"$TMP/hostnames"
+[ "$1" ] || usage 1
+
+# Generate a passwordless SSH key pair.
+ssh-keygen -C"ssh-freeagent $$ on $(hostname) at $(date)" -N "" -b"2048" -f"$TMP/id_rsa" -q -t"rsa"
+export SSH_FREEAGENT_IDENTITY="$TMP/id_rsa"
+
+# Authorize the new public key to login to the remote host.
+while read HOSTNAME
+do
+    if [ "$IDENTITY" ]
+    then ssh -i"$IDENTITY" "$HOSTNAME" tee -a ".ssh/authorized_keys" <"$TMP/id_rsa.pub" >"/dev/null"
+    else ssh "$HOSTNAME" tee -a ".ssh/authorized_keys" <"$TMP/id_rsa.pub" >"/dev/null"
+    fi
+done <"$TMP/hostnames"
+
+# Force future SSH connections to use the new private key.
+unset SSH_AUTH_SOCK
+
+# Cleanup after ourselves, both locally and remotely.
+SHA="$(sha1sum "$TMP/id_rsa.pub" | cut -d" " -f"1")"
+while read HOSTNAME
+do
+    ssh -i"$SSH_FREEAGENT_IDENTITY" "$HOSTNAME" tee "/tmp/ssh-freeagent.$SHA" >"/dev/null" <<EOF
+set -e
+rm -f "/tmp/ssh-freeagent.$SHA"
+TMP="\$(mktemp)"
+trap "rm -f \\"\$TMP\\"" EXIT INT QUIT TERM
+grep -v "$(cat "$TMP/id_rsa.pub")" ".ssh/authorized_keys" >"\$TMP"
+mv "\$TMP" ".ssh/authorized_keys"
+EOF
+done <"$TMP/hostnames"
+trap "xargs -I\"__\" $(which "ssh") -i"$SSH_FREEAGENT_IDENTITY" \"__\" /bin/sh \"/tmp/ssh-freeagent.$SHA\" <\"$TMP/hostnames\"; rm -rf \"$TMP\"" EXIT INT QUIT TERM
+
+# Wrap ssh(1) so the new identity is always specified.
+mkdir "$TMP/bin"
+cat >"$TMP/bin/ssh" <<EOF
+#!/bin/sh
+exec $(which "ssh") -i"$SSH_FREEAGENT_IDENTITY" "\$@"
+EOF
+chmod 755 "$TMP/bin/ssh"
+export PATH="$TMP/bin:$PATH"
+
+# Run the command.
+"$@"
